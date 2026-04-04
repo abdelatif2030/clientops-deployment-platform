@@ -1,0 +1,143 @@
+---
+- name: Setup EC2 instances
+  hosts: all
+  become: yes
+
+  vars:
+    prometheus_version: "2.52.0"
+    node_exporter_version: "1.6.1"
+    prometheus_dir: /opt/prometheus
+    prometheus_config: /opt/prometheus/prometheus.yml
+
+  tasks:
+
+    # ------------------------------
+    # Update system and install essentials
+    # ------------------------------
+    - name: Update apt cache and upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Install required packages
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - unzip
+          - curl
+          - git
+          - apt-transport-https
+          - software-properties-common
+        state: present
+
+    # ------------------------------
+    # Install Docker
+    # ------------------------------
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Ensure Docker service is running
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    # ------------------------------
+    # Install Node Exporter
+    # ------------------------------
+    - name: Download Node Exporter
+      shell: |
+        curl -LO https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz
+        tar xvf node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz
+        mv node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter /usr/local/bin/
+      args:
+        creates: /usr/local/bin/node_exporter
+
+    - name: Create systemd service for Node Exporter
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=root
+          ExecStart=/usr/local/bin/node_exporter
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start Node Exporter
+      systemd:
+        name: node_exporter
+        enabled: yes
+        state: started
+
+    # ------------------------------
+    # Install Prometheus
+    # ------------------------------
+    - name: Download Prometheus
+      shell: |
+        curl -LO https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz
+        tar xvf prometheus-{{ prometheus_version }}.linux-amd64.tar.gz
+        mv prometheus-{{ prometheus_version }}.linux-amd64 {{ prometheus_dir }}
+      args:
+        creates: "{{ prometheus_dir }}"
+
+    - name: Create Prometheus configuration from template
+      template:
+        src: prometheus.yml.j2
+        dest: "{{ prometheus_config }}"
+
+    - name: Create systemd service for Prometheus
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          After=network.target
+
+          [Service]
+          User=root
+          ExecStart={{ prometheus_dir }}/prometheus --config.file={{ prometheus_config }}
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable and start Prometheus
+      systemd:
+        name: prometheus
+        enabled: yes
+        state: started
+
+    # ------------------------------
+    # Install Grafana from official repo
+    # ------------------------------
+    - name: Add Grafana GPG key
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+
+    - name: Add Grafana APT repository
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+
+    - name: Update apt cache after adding Grafana repo
+      apt:
+        update_cache: yes
+
+    - name: Install Grafana
+      apt:
+        name: grafana
+        state: present
+
+    - name: Enable and start Grafana
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started

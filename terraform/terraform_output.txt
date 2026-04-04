@@ -1,0 +1,2 @@
+app_server_public_ip = "13.60.238.29"
+monitoring_server_public_ip = "16.16.202.182"
