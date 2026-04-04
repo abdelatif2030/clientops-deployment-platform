@@ -1,0 +1,11 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.retry
+*.pem
+*.key
+terraform.tfvars
+.env
+__pycache__/
+*.pyc
+.ansible/
