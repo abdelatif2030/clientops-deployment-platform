@@ -1,69 +1,16 @@
 pipeline {
     agent any
-
     environment {
-        AWS_DEFAULT_REGION = 'eu-north-1'
-        TF_IN_AUTOMATION = 'true'
-        DOCKER_IMAGE = 'abdo1997mohamed2030/clientops-app'
-        IMAGE_TAG = "${BUILD_NUMBER}"
-        ANSIBLE_VENV = '/opt/ansible-venv'  // Path to Ansible virtual environment
-        PATH = "${ANSIBLE_VENV}/bin:${env.PATH}"
+        AWS_ACCESS_KEY_ID = credentials('aws_access_key_id')
+        AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+        DOCKER_IMAGE = 'myapp'       // Change this to your Docker image name
+        IMAGE_TAG = 'latest'
     }
-
-    options {
-        timestamps()
-    }
-
     stages {
-
-        stage('Checkout Code') {
-            steps {
-                git branch: 'main',
-                    credentialsId: 'github',
-                    url: 'https://github.com/abdelatif2030/clientops-deployment-platform.git'
-            }
-        }
-
-        stage('Verify Tools') {
-            steps {
-                sh '''
-                    echo "=== Checking installed tools ==="
-                    git --version
-                    python3 --version
-                    docker --version
-                    terraform version
-                    ansible --version || echo "Ansible not found"
-                    aws --version
-                '''
-            }
-        }
-
-        stage('Setup Ansible Venv') {
-            steps {
-                sh '''
-                    if [ ! -d "$ANSIBLE_VENV" ]; then
-                        python3 -m venv $ANSIBLE_VENV
-                        source $ANSIBLE_VENV/bin/activate
-                        pip install --upgrade pip
-                        pip install ansible
-                    fi
-                    echo "=== Ansible version in venv ==="
-                    $ANSIBLE_VENV/bin/ansible --version
-                '''
-            }
-        }
-
-        stage('Terraform Init') {
+        stage('Terraform Init & Validate') {
             steps {
                 dir('terraform') {
                     sh 'terraform init'
-                }
-            }
-        }
-
-        stage('Terraform Validate') {
-            steps {
-                dir('terraform') {
                     sh 'terraform validate'
                 }
             }
@@ -71,22 +18,21 @@ pipeline {
 
         stage('Terraform Apply') {
             steps {
-                withCredentials([[ $class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws' ]]) {
-                    dir('terraform') {
-                        sh 'terraform apply -auto-approve'
-                    }
+                dir('terraform') {
+                    sh 'terraform apply -auto-approve'
                 }
             }
         }
 
         stage('Generate Inventory') {
             steps {
-                sh '''
-                    APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
-                    MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
-
-                    mkdir -p /var/jenkins_home/.ansible/tmp
-                    cat > hosts.ini <<EOF
+                dir('terraform') {
+                    script {
+                        APP_IP = sh(script: "terraform output -raw app_server_public_ip", returnStdout: true).trim()
+                        MONITOR_IP = sh(script: "terraform output -raw monitoring_server_public_ip", returnStdout: true).trim()
+                        sh """
+                        mkdir -p /var/jenkins_home/.ansible/tmp
+                        cat > hosts.ini <<EOF
 [app_servers]
 $APP_IP ansible_user=ubuntu ansible_ssh_private_key_file=/var/jenkins_home/.ssh/terraform.pem
 
@@ -96,27 +42,35 @@ $MONITOR_IP ansible_user=ubuntu ansible_ssh_private_key_file=/var/jenkins_home/.
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
 EOF
-
-                    echo "=== Generated hosts.ini ==="
-                    cat hosts.ini
-                '''
+                        """
+                    }
+                }
             }
         }
 
         stage('Wait for EC2 SSH') {
             steps {
-                sh '''
-                    echo "Waiting 60 seconds for EC2 instances to be ready..."
-                    sleep 60
-                '''
+                echo "Waiting 60 seconds for EC2 instances to be ready..."
+                sleep 60
+            }
+        }
+
+        stage('Add EC2 Host Keys') {
+            steps {
+                script {
+                    sh """
+                    ssh-keyscan -H ${APP_IP} >> /var/jenkins_home/.ssh/known_hosts
+                    ssh-keyscan -H ${MONITOR_IP} >> /var/jenkins_home/.ssh/known_hosts
+                    """
+                }
             }
         }
 
         stage('Run Ansible Setup') {
             steps {
                 sh '''
-                    chmod 600 /var/jenkins_home/.ssh/terraform.pem
-                    $ANSIBLE_VENV/bin/ansible-playbook -i hosts.ini setup.yml
+                chmod 600 /var/jenkins_home/.ssh/terraform.pem
+                /opt/ansible-venv/bin/ansible-playbook -i hosts.ini setup.yml
                 '''
             }
         }
@@ -124,9 +78,8 @@ EOF
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    echo "=== Building Docker image ==="
-                    docker build -t $DOCKER_IMAGE:$IMAGE_TAG .
-                    docker tag $DOCKER_IMAGE:$IMAGE_TAG $DOCKER_IMAGE:latest
+                docker build -t $DOCKER_IMAGE:$IMAGE_TAG .
+                docker tag $DOCKER_IMAGE:$IMAGE_TAG $DOCKER_IMAGE:latest
                 '''
             }
         }
