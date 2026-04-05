@@ -1,12 +1,12 @@
 # ---------------------------
-# Use default VPC
+# Data: Default VPC
 # ---------------------------
 data "aws_vpc" "default" {
   default = true
 }
 
 # ---------------------------
-# Get latest Ubuntu 22.04 LTS AMI
+# Data: Latest Ubuntu 22.04 AMI
 # ---------------------------
 data "aws_ami" "ubuntu" {
   most_recent = true
@@ -44,23 +44,28 @@ resource "aws_security_group" "clientops_sg" {
 }
 
 # ---------------------------
-# Public Key for root access
+# Key Pair for Terraform PEM
+# ---------------------------
+resource "aws_key_pair" "terraform" {
+  key_name   = "terraform"
+  public_key = file("/var/jenkins_home/.ssh/terraform.pub")
+}
+
+# ---------------------------
+# Root Public Key for User Data
 # ---------------------------
 variable "root_public_key" {
   default = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDxkfLKhCBPFlOvgyDpRmupFyzhrvA5yxmBfuQfdFj+Eie6xebK8p9P+zClSxYcDlKVFVqFuxItT6mNZmNYxgWCK1hFAVAOcwd7Stn8MvqaQzXDogWk3VPp5YzbgwdDQceQRKHfw9wli0JmHfjlTz5zkQ/hV5wwcM9s9edh5kcqKlnFwOeLDgRZ0fEjBr0gUI2I2EQEOdQPAzL+Q92Pp9oEuYoqsu7iryqAQwfPhNDYx7S7FhHjUKDq5fWHlZH4kc0wBYjphjwoXb/cJYv5ZPnwDSdKT4E4ct+3HiYxFtrpbsKRc7sLwMTt6Hwv+ujb7oqKBfv2Z3aKLeF9X5Mi3NO/"
 }
 
-# ---------------------------
-# User Data Script for root access
-# ---------------------------
 locals {
   user_data_root_key = <<-EOF
-              #!/bin/bash
-              mkdir -p /root/.ssh
-              echo "${var.root_public_key}" >> /root/.ssh/authorized_keys
-              chmod 600 /root/.ssh/authorized_keys
-              chown root:root /root/.ssh/authorized_keys
-              EOF
+    #!/bin/bash
+    mkdir -p /root/.ssh
+    echo "${var.root_public_key}" >> /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+    chown root:root /root/.ssh/authorized_keys
+  EOF
 }
 
 # ---------------------------
@@ -69,7 +74,7 @@ locals {
 resource "aws_instance" "app_server" {
   ami             = data.aws_ami.ubuntu.id
   instance_type   = "t3.micro"
-  key_name        = "terraform"
+  key_name        = aws_key_pair.terraform.key_name
   security_groups = [aws_security_group.clientops_sg.name]
   tags = { Name = "app-server" }
 
@@ -82,9 +87,20 @@ resource "aws_instance" "app_server" {
 resource "aws_instance" "monitoring_server" {
   ami             = data.aws_ami.ubuntu.id
   instance_type   = "t3.micro"
-  key_name        = "terraform"
+  key_name        = aws_key_pair.terraform.key_name
   security_groups = [aws_security_group.clientops_sg.name]
   tags = { Name = "monitoring-server" }
 
   user_data = local.user_data_root_key
+}
+
+# ---------------------------
+# Outputs
+# ---------------------------
+output "app_server_public_ip" {
+  value = aws_instance.app_server.public_ip
+}
+
+output "monitoring_server_public_ip" {
+  value = aws_instance.monitoring_server.public_ip
 }
