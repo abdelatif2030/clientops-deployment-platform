@@ -55,7 +55,7 @@ pipeline {
             }
         }
 
-        stage('Terraform Init & Apply') {
+        stage('Terraform Apply') {
             steps {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws']]) {
                     dir('terraform') {
@@ -69,25 +69,32 @@ pipeline {
             }
         }
 
-        stage('Generate Inventory & Detect SSH User') {
+        stage('Generate Inventory') {
             steps {
                 sh '''
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
-                    # Detect correct SSH user
-                    SSH_USER="ubuntu"
-                    ssh -i $SSH_KEY -o ConnectTimeout=5 $SSH_USER@$APP_IP 'echo ok' 2>/dev/null || SSH_USER="ec2-user"
+                    # Try multiple users
+                    find_ssh_user() {
+                        for u in ubuntu ec2-user admin centos; do
+                            ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 'echo ok' &>/dev/null && echo $u && return
+                        done
+                        echo "ERROR: No SSH user works for $1" && exit 1
+                    }
 
-                    echo "Using SSH_USER=$SSH_USER"
+                    APP_USER=$(find_ssh_user $APP_IP)
+                    MONITOR_USER=$(find_ssh_user $MONITOR_IP)
+                    echo "Detected users: $APP_IP -> $APP_USER, $MONITOR_IP -> $MONITOR_USER"
 
+                    # Generate Ansible inventory
                     mkdir -p /var/jenkins_home/.ansible/tmp
                     cat > hosts.ini <<EOF
 [app_servers]
-$APP_IP ansible_user=$SSH_USER ansible_ssh_private_key_file=$SSH_KEY
+$APP_IP ansible_user=$APP_USER ansible_ssh_private_key_file=$SSH_KEY
 
 [monitoring_servers]
-$MONITOR_IP ansible_user=$SSH_USER ansible_ssh_private_key_file=$SSH_KEY
+$MONITOR_IP ansible_user=$MONITOR_USER ansible_ssh_private_key_file=$SSH_KEY
 
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
@@ -99,31 +106,18 @@ EOF
             }
         }
 
-        stage('Prepare SSH Known Hosts') {
+        stage('Wait for SSH Access') {
             steps {
                 sh '''
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
-                    mkdir -p ~/.ssh
-                    chmod 700 ~/.ssh
-                    ssh-keyscan -H $APP_IP >> ~/.ssh/known_hosts
-                    ssh-keyscan -H $MONITOR_IP >> ~/.ssh/known_hosts
-                    chmod 644 ~/.ssh/known_hosts
-                    echo "=== SSH known_hosts updated ==="
-                '''
-            }
-        }
-
-        stage('Wait for EC2 SSH') {
-            steps {
-                sh '''
-                    APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
-                    MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
+                    APP_USER=$(awk "/$APP_IP/ {print \$2}" hosts.ini | cut -d= -f2)
+                    MONITOR_USER=$(awk "/$MONITOR_IP/ {print \$2}" hosts.ini | cut -d= -f2)
 
                     echo "Waiting for SSH access..."
                     for i in {1..12}; do
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$APP_IP 'echo ok' && \
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$MONITOR_IP 'echo ok' && break
+                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $APP_USER@$APP_IP 'echo ok' && \
+                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $MONITOR_USER@$MONITOR_IP 'echo ok' && break
                         echo "SSH not ready yet, retrying 10s..."
                         sleep 10
                     done
@@ -144,14 +138,13 @@ EOF
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    echo "=== Building Docker image ==="
                     docker build -t $DOCKER_IMAGE:$IMAGE_TAG .
                     docker tag $DOCKER_IMAGE:$IMAGE_TAG $DOCKER_IMAGE:latest
                 '''
             }
         }
 
-        stage('Push Docker Image to Docker Hub') {
+        stage('Push Docker Image') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub',
@@ -170,14 +163,8 @@ EOF
     }
 
     post {
-        success {
-            echo 'SUCCESS: Full CI/CD pipeline completed successfully!'
-        }
-        failure {
-            echo 'FAILED: Pipeline execution failed. Check the console output.'
-        }
-        always {
-            echo 'Pipeline finished.'
-        }
+        success { echo 'SUCCESS: Pipeline completed successfully!' }
+        failure { echo 'FAILED: Check SSH key, user, and console logs.' }
+        always { echo 'Pipeline finished.' }
     }
 }
