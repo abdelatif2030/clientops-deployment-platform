@@ -75,7 +75,7 @@ pipeline {
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
-                    # Try multiple users
+                    # Function to find working SSH user
                     find_ssh_user() {
                         for u in ubuntu ec2-user admin centos; do
                             ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 'echo ok' &>/dev/null && echo $u && return
@@ -111,8 +111,8 @@ EOF
                 sh '''
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
-                    APP_USER=$(awk "/$APP_IP/ {print \$2}" hosts.ini | cut -d= -f2)
-                    MONITOR_USER=$(awk "/$MONITOR_IP/ {print \$2}" hosts.ini | cut -d= -f2)
+                    APP_USER=$(awk "/$APP_IP/ {for(i=1;i<=NF;i++) if(\$i ~ /^ansible_user=/){split(\$i,a,\"=\"); print a[2]}}" hosts.ini)
+                    MONITOR_USER=$(awk "/$MONITOR_IP/ {for(i=1;i<=NF;i++) if(\$i ~ /^ansible_user=/){split(\$i,a,\"=\"); print a[2]}}" hosts.ini)
 
                     echo "Waiting for SSH access..."
                     for i in {1..12}; do
