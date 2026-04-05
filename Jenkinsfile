@@ -6,6 +6,8 @@ pipeline {
         TF_IN_AUTOMATION = 'true'
         DOCKER_IMAGE = 'abdo1997mohamed2030/clientops-app'
         IMAGE_TAG = "${BUILD_NUMBER}"
+        ANSIBLE_VENV = '/opt/ansible-venv'  // Path to Ansible virtual environment
+        PATH = "${ANSIBLE_VENV}/bin:${env.PATH}"
     }
 
     options {
@@ -30,8 +32,23 @@ pipeline {
                     python3 --version
                     docker --version
                     terraform version
-                    ansible --version
+                    ansible --version || echo "Ansible not found"
                     aws --version
+                '''
+            }
+        }
+
+        stage('Setup Ansible Venv') {
+            steps {
+                sh '''
+                    if [ ! -d "$ANSIBLE_VENV" ]; then
+                        python3 -m venv $ANSIBLE_VENV
+                        source $ANSIBLE_VENV/bin/activate
+                        pip install --upgrade pip
+                        pip install ansible
+                    fi
+                    echo "=== Ansible version in venv ==="
+                    $ANSIBLE_VENV/bin/ansible --version
                 '''
             }
         }
@@ -54,10 +71,7 @@ pipeline {
 
         stage('Terraform Apply') {
             steps {
-                withCredentials([[
-                    $class: 'AmazonWebServicesCredentialsBinding',
-                    credentialsId: 'aws'
-                ]]) {
+                withCredentials([[ $class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws' ]]) {
                     dir('terraform') {
                         sh 'terraform apply -auto-approve'
                     }
@@ -71,6 +85,7 @@ pipeline {
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
+                    mkdir -p /var/jenkins_home/.ansible/tmp
                     cat > hosts.ini <<EOF
 [app_servers]
 $APP_IP ansible_user=ubuntu ansible_ssh_private_key_file=/var/jenkins_home/.ssh/terraform.pem
@@ -101,7 +116,7 @@ EOF
             steps {
                 sh '''
                     chmod 600 /var/jenkins_home/.ssh/terraform.pem
-                    ansible-playbook -i hosts.ini setup.yml
+                    $ANSIBLE_VENV/bin/ansible-playbook -i hosts.ini setup.yml
                 '''
             }
         }
@@ -124,13 +139,9 @@ EOF
                     passwordVariable: 'DOCKERHUB_PASS'
                 )]) {
                     sh '''
-                        echo "=== Logging in to Docker Hub ==="
                         echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
-
-                        echo "=== Pushing Docker images ==="
                         docker push $DOCKER_IMAGE:$IMAGE_TAG
                         docker push $DOCKER_IMAGE:latest
-
                         docker logout
                     '''
                 }
