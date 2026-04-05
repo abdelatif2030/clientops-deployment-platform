@@ -1,9 +1,13 @@
+# ---------------------------
 # Use default VPC
+# ---------------------------
 data "aws_vpc" "default" {
   default = true
 }
 
-# Dynamically get latest Ubuntu 22.04 LTS AMI in eu-north-1
+# ---------------------------
+# Get latest Ubuntu 22.04 LTS AMI
+# ---------------------------
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -14,7 +18,9 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-# Security group that allows all traffic
+# ---------------------------
+# Security Group - Allow all traffic
+# ---------------------------
 resource "aws_security_group" "clientops_sg" {
   name        = "clientops_sg"
   description = "Allow all traffic"
@@ -37,20 +43,48 @@ resource "aws_security_group" "clientops_sg" {
   }
 }
 
-# App EC2
-resource "aws_instance" "app_server" {
-  ami           = data.aws_ami.ubuntu.id
-  instance_type = "t3.micro"
-  key_name      = "terraform"
-  security_groups = [aws_security_group.clientops_sg.name]
-  tags = { Name = "app-server" }
+# ---------------------------
+# Public Key for root access
+# ---------------------------
+variable "root_public_key" {
+  default = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDxkfLKhCBPFlOvgyDpRmupFyzhrvA5yxmBfuQfdFj+Eie6xebK8p9P+zClSxYcDlKVFVqFuxItT6mNZmNYxgWCK1hFAVAOcwd7Stn8MvqaQzXDogWk3VPp5YzbgwdDQceQRKHfw9wli0JmHfjlTz5zkQ/hV5wwcM9s9edh5kcqKlnFwOeLDgRZ0fEjBr0gUI2I2EQEOdQPAzL+Q92Pp9oEuYoqsu7iryqAQwfPhNDYx7S7FhHjUKDq5fWHlZH4kc0wBYjphjwoXb/cJYv5ZPnwDSdKT4E4ct+3HiYxFtrpbsKRc7sLwMTt6Hwv+ujb7oqKBfv2Z3aKLeF9X5Mi3NO/"
 }
 
-# Monitoring EC2
+# ---------------------------
+# User Data Script for root access
+# ---------------------------
+locals {
+  user_data_root_key = <<-EOF
+              #!/bin/bash
+              mkdir -p /root/.ssh
+              echo "${var.root_public_key}" >> /root/.ssh/authorized_keys
+              chmod 600 /root/.ssh/authorized_keys
+              chown root:root /root/.ssh/authorized_keys
+              EOF
+}
+
+# ---------------------------
+# App Server
+# ---------------------------
+resource "aws_instance" "app_server" {
+  ami             = data.aws_ami.ubuntu.id
+  instance_type   = "t3.micro"
+  key_name        = "terraform"
+  security_groups = [aws_security_group.clientops_sg.name]
+  tags = { Name = "app-server" }
+
+  user_data = local.user_data_root_key
+}
+
+# ---------------------------
+# Monitoring Server
+# ---------------------------
 resource "aws_instance" "monitoring_server" {
-  ami           = data.aws_ami.ubuntu.id
-  instance_type = "t3.micro"
-  key_name      = "terraform"
+  ami             = data.aws_ami.ubuntu.id
+  instance_type   = "t3.micro"
+  key_name        = "terraform"
   security_groups = [aws_security_group.clientops_sg.name]
   tags = { Name = "monitoring-server" }
+
+  user_data = local.user_data_root_key
 }
