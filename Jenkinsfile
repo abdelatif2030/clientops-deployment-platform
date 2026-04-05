@@ -75,7 +75,7 @@ pipeline {
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
-                    # Function to find working SSH user
+                    # Detect working SSH user (tries common users)
                     find_ssh_user() {
                         for u in ubuntu ec2-user admin centos; do
                             ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 'echo ok' &>/dev/null && echo $u && return
@@ -87,7 +87,7 @@ pipeline {
                     MONITOR_USER=$(find_ssh_user $MONITOR_IP)
                     echo "Detected users: $APP_IP -> $APP_USER, $MONITOR_IP -> $MONITOR_USER"
 
-                    # Generate Ansible inventory
+                    # Generate inventory
                     mkdir -p /var/jenkins_home/.ansible/tmp
                     cat > hosts.ini <<EOF
 [app_servers]
@@ -99,7 +99,6 @@ $MONITOR_IP ansible_user=$MONITOR_USER ansible_ssh_private_key_file=$SSH_KEY
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
 EOF
-
                     echo "=== Generated hosts.ini ==="
                     cat hosts.ini
                 '''
@@ -111,8 +110,8 @@ EOF
                 sh '''
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
-                    APP_USER=$(awk "/$APP_IP/ {for(i=1;i<=NF;i++) if(\$i ~ /^ansible_user=/){split(\$i,a,\"=\"); print a[2]}}" hosts.ini)
-                    MONITOR_USER=$(awk "/$MONITOR_IP/ {for(i=1;i<=NF;i++) if(\$i ~ /^ansible_user=/){split(\$i,a,\"=\"); print a[2]}}" hosts.ini)
+                    APP_USER=$(grep "$APP_IP" hosts.ini | sed -n 's/.*ansible_user=\\([^ ]*\\).*/\\1/p')
+                    MONITOR_USER=$(grep "$MONITOR_IP" hosts.ini | sed -n 's/.*ansible_user=\\([^ ]*\\).*/\\1/p')
 
                     echo "Waiting for SSH access..."
                     for i in {1..12}; do
