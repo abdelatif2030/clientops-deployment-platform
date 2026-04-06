@@ -13,7 +13,8 @@ pipeline {
 
     options {
         timestamps()
-        timeout(time: 60, unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')
+        ansiColor('xterm')
     }
 
     stages {
@@ -45,12 +46,12 @@ pipeline {
                 sh '''
                     if [ ! -d "$ANSIBLE_VENV" ]; then
                         python3 -m venv $ANSIBLE_VENV
-                        source $ANSIBLE_VENV/bin/activate
-                        pip install --upgrade pip
-                        pip install ansible
                     fi
+                    source $ANSIBLE_VENV/bin/activate
+                    pip install --upgrade pip
+                    pip install ansible
                     echo "=== Ansible version in venv ==="
-                    $ANSIBLE_VENV/bin/ansible --version
+                    ansible --version
                 '''
             }
         }
@@ -75,19 +76,20 @@ pipeline {
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
-                    # Detect working SSH user (tries common users)
+                    # Detect working SSH user (common defaults)
                     find_ssh_user() {
                         for u in ubuntu ec2-user admin centos; do
                             ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 'echo ok' &>/dev/null && echo $u && return
                         done
-                        echo "ERROR: No SSH user works for $1" && exit 1
+                        echo "ERROR: No SSH user works for $1" >&2
+                        exit 1
                     }
 
                     APP_USER=$(find_ssh_user $APP_IP)
                     MONITOR_USER=$(find_ssh_user $MONITOR_IP)
                     echo "Detected users: $APP_IP -> $APP_USER, $MONITOR_IP -> $MONITOR_USER"
 
-                    # Generate inventory
+                    # Generate hosts.ini
                     mkdir -p /var/jenkins_home/.ansible/tmp
                     cat > hosts.ini <<EOF
 [app_servers]
@@ -114,7 +116,7 @@ EOF
                     MONITOR_USER=$(grep "$MONITOR_IP" hosts.ini | sed -n 's/.*ansible_user=\\([^ ]*\\).*/\\1/p')
 
                     echo "Waiting for SSH access..."
-                    for i in {1..12}; do
+                    for i in {1..30}; do
                         ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $APP_USER@$APP_IP 'echo ok' && \
                         ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $MONITOR_USER@$MONITOR_IP 'echo ok' && break
                         echo "SSH not ready yet, retrying 10s..."
@@ -128,7 +130,8 @@ EOF
             steps {
                 sh '''
                     chmod 600 $SSH_KEY
-                    $ANSIBLE_VENV/bin/ansible-playbook -i hosts.ini setup.yml \
+                    source $ANSIBLE_VENV/bin/activate
+                    ansible-playbook -i hosts.ini setup.yml \
                         --ssh-extra-args="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
                 '''
             }
