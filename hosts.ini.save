@@ -1,0 +1,19 @@
+[app_servers]
+13.49.74.115 ansible_user=ubuntu ansible_ssh_private_key_file=/var/jenkins_home/.ssh/terraform.pem
+
+[monitoring_servers]
+13.61.184.94 ansible_user=ubuntu ansible_ssh_private_key_file=/var/jenkins_home/.ssh/terraform.pem
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+
+
+
+
+
+
+
+
+
+
+
