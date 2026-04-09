@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     git \
     python3 \
+    python3-venv \
     python3-pip \
     ca-certificates \
     gnupg \
@@ -21,14 +22,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # -------------------------------
-# Install pipx and Ansible
+# Install Ansible in virtual environment
 # -------------------------------
-RUN pip3 install --upgrade pip && \
-    pip3 install pipx && \
-    pipx install ansible
+RUN python3 -m venv /opt/ansible-venv \
+    && /opt/ansible-venv/bin/pip install --upgrade pip \
+    && /opt/ansible-venv/bin/pip install ansible
 
-# Ensure pipx binaries are in PATH
-ENV PATH="/root/.local/bin:${PATH}"
+# Add venv to PATH
+ENV PATH="/opt/ansible-venv/bin:${PATH}"
 
 # -------------------------------
 # Install Docker CLI
