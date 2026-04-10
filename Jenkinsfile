@@ -9,9 +9,8 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
 
         ANSIBLE_VENV = '/opt/ansible-venv'
-        PATH = "${ANSIBLE_VENV}/bin:${env.PATH}"
 
-        WORK_DIR = "${WORKSPACE}"
+        WORKSPACE_DIR = "${WORKSPACE}"
         TF_DIR = "${WORKSPACE}/terraform"
 
         SSH_KEY = "${WORKSPACE}/terraform.pem"
@@ -41,7 +40,6 @@ pipeline {
                     docker --version
                     terraform version
                     aws --version
-                    ansible --version || true
                 '''
             }
         }
@@ -55,47 +53,42 @@ pipeline {
                         $ANSIBLE_VENV/bin/pip install ansible
                     fi
 
-                    echo "=== Ansible Version ==="
                     $ANSIBLE_VENV/bin/ansible --version
                 '''
             }
         }
 
-        stage('Terraform Init & Apply (FIXED)') {
+        stage('Terraform Init & Apply') {
             steps {
                 dir('terraform') {
                     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws']]) {
                         sh '''
                             terraform init -reconfigure
-
-                            # IMPORTANT: prevent duplicate resources
+                            terraform validate
                             terraform plan -out=tfplan
                             terraform apply -auto-approve tfplan
-
-                            terraform output -json > tf-output.json
                         '''
                     }
                 }
             }
         }
 
-        stage('Fix SSH Key from Terraform') {
+        stage('Prepare SSH Key (FIXED SAFE METHOD)') {
             steps {
-                dir('terraform') {
-                    sh '''
-                        echo "Extracting SSH key from Terraform state..."
+                sh '''
+                    echo "⚠ IMPORTANT: Using pre-generated SSH key from Jenkins workspace"
 
-                        terraform output -raw private_key > ../terraform.pem || true
+                    if [ ! -f "$SSH_KEY" ]; then
+                        echo "ERROR: terraform.pem NOT FOUND in workspace!"
+                        echo "👉 You MUST place your private key manually or generate it externally."
+                        exit 1
+                    fi
 
-                        if [ -f ../terraform.pem ]; then
-                            chmod 600 ../terraform.pem
-                            echo "SSH key saved successfully"
-                        else
-                            echo "ERROR: No private key output found in Terraform!"
-                            exit 1
-                        fi
-                    '''
-                }
+                    chmod 600 $SSH_KEY
+
+                    echo "SSH Key OK:"
+                    head -n 2 $SSH_KEY
+                '''
             }
         }
 
@@ -162,8 +155,6 @@ EOF
         stage('Run Ansible') {
             steps {
                 sh '''
-                    chmod 600 $SSH_KEY || true
-
                     $ANSIBLE_VENV/bin/ansible-playbook -i hosts.ini setup.yml \
                         -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                 '''
@@ -201,10 +192,10 @@ EOF
 
     post {
         success {
-            echo "SUCCESS: Deployment completed"
+            echo "SUCCESS: Pipeline completed successfully"
         }
         failure {
-            echo "FAILED: Check Terraform / SSH / AWS permissions"
+            echo "FAILED: Check Terraform, SSH key, or AWS security groups"
         }
         always {
             echo "Pipeline finished"
