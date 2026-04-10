@@ -1,11 +1,4 @@
 # ---------------------------
-# Provider
-# ---------------------------
-provider "aws" {
-  region = "us-east-1"
-}
-
-# ---------------------------
 # Data: Default VPC
 # ---------------------------
 data "aws_vpc" "default" {
@@ -26,7 +19,7 @@ data "aws_ami" "ubuntu" {
 }
 
 # ---------------------------
-# Security Group - Allow all
+# Security Group - Allow all traffic
 # ---------------------------
 resource "aws_security_group" "clientops_sg" {
   name        = "clientops_sg"
@@ -51,19 +44,11 @@ resource "aws_security_group" "clientops_sg" {
 }
 
 # ---------------------------
-# Generate SSH Key (IMPORTANT)
-# ---------------------------
-resource "tls_private_key" "terraform" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-# ---------------------------
-# AWS Key Pair
+# Key Pair for Terraform PEM
 # ---------------------------
 resource "aws_key_pair" "terraform" {
-  key_name   = "terraform-key"
-  public_key = tls_private_key.terraform.public_key_openssh
+  key_name   = "terraform"
+  public_key = file("/var/jenkins_home/.ssh/terraform.pub")
 }
 
 # ---------------------------
@@ -87,14 +72,11 @@ locals {
 # App Server
 # ---------------------------
 resource "aws_instance" "app_server" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.micro"
-  key_name               = aws_key_pair.terraform.key_name
-  vpc_security_group_ids = [aws_security_group.clientops_sg.id]
-
-  tags = {
-    Name = "app-server"
-  }
+  ami             = data.aws_ami.ubuntu.id
+  instance_type   = "t3.micro"
+  key_name        = aws_key_pair.terraform.key_name
+  security_groups = [aws_security_group.clientops_sg.name]
+  tags = { Name = "app-server" }
 
   user_data = local.user_data_root_key
 }
@@ -103,30 +85,11 @@ resource "aws_instance" "app_server" {
 # Monitoring Server
 # ---------------------------
 resource "aws_instance" "monitoring_server" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = "t3.micro"
-  key_name               = aws_key_pair.terraform.key_name
-  vpc_security_group_ids = [aws_security_group.clientops_sg.id]
-
-  tags = {
-    Name = "monitoring-server"
-  }
+  ami             = data.aws_ami.ubuntu.id
+  instance_type   = "t3.micro"
+  key_name        = aws_key_pair.terraform.key_name
+  security_groups = [aws_security_group.clientops_sg.name]
+  tags = { Name = "monitoring-server" }
 
   user_data = local.user_data_root_key
-}
-
-# ---------------------------
-# Outputs
-# ---------------------------
-output "app_server_public_ip" {
-  value = aws_instance.app_server.public_ip
-}
-
-output "monitoring_server_public_ip" {
-  value = aws_instance.monitoring_server.public_ip
-}
-
-output "private_key" {
-  value     = tls_private_key.terraform.private_key_pem
-  sensitive = true
 }
