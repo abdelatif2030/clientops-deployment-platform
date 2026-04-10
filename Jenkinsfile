@@ -9,10 +9,9 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
 
         ANSIBLE_VENV = '/opt/ansible-venv'
+        PATH = "${ANSIBLE_VENV}/bin:${env.PATH}"
 
-        WORKSPACE_DIR = "${WORKSPACE}"
         TF_DIR = "${WORKSPACE}/terraform"
-
         SSH_KEY = "${WORKSPACE}/terraform.pem"
     }
 
@@ -23,18 +22,17 @@ pipeline {
 
     stages {
 
-        stage('Checkout Code') {
+        stage('Checkout') {
             steps {
                 git branch: 'main',
-                    credentialsId: 'github',
-                    url: 'https://github.com/abdelatif2030/clientops-deployment-platform.git'
+                credentialsId: 'github',
+                url: 'https://github.com/abdelatif2030/clientops-deployment-platform.git'
             }
         }
 
-        stage('Verify Tools') {
+        stage('Tools Check') {
             steps {
                 sh '''
-                    echo "=== Tools Check ==="
                     git --version
                     python3 --version
                     docker --version
@@ -44,7 +42,7 @@ pipeline {
             }
         }
 
-        stage('Setup Ansible Venv') {
+        stage('Setup Ansible') {
             steps {
                 sh '''
                     if [ ! -d "$ANSIBLE_VENV" ]; then
@@ -52,116 +50,87 @@ pipeline {
                         $ANSIBLE_VENV/bin/pip install --upgrade pip
                         $ANSIBLE_VENV/bin/pip install ansible
                     fi
-
-                    $ANSIBLE_VENV/bin/ansible --version
                 '''
             }
         }
 
-        stage('Terraform Init & Apply') {
+        stage('Terraform Apply') {
             steps {
                 dir('terraform') {
                     withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws']]) {
                         sh '''
                             terraform init -reconfigure
-                            terraform validate
-                            terraform plan -out=tfplan
-                            terraform apply -auto-approve tfplan
+                            terraform apply -auto-approve
                         '''
                     }
                 }
             }
         }
 
-        stage('Prepare SSH Key (FIXED SAFE METHOD)') {
+        stage('Extract SSH Key (FIXED)') {
             steps {
-                sh '''
-                    echo "⚠ IMPORTANT: Using pre-generated SSH key from Jenkins workspace"
+                dir('terraform') {
+                    sh '''
+                        echo "Extracting private key..."
 
-                    if [ ! -f "$SSH_KEY" ]; then
-                        echo "ERROR: terraform.pem NOT FOUND in workspace!"
-                        echo "👉 You MUST place your private key manually or generate it externally."
-                        exit 1
-                    fi
+                        terraform output -raw private_key_pem > ../terraform.pem
 
-                    chmod 600 $SSH_KEY
+                        # CRITICAL FIX
+                        sed -i 's/\\n/\
+/g' ../terraform.pem
 
-                    echo "SSH Key OK:"
-                    head -n 2 $SSH_KEY
-                '''
+                        chmod 600 ../terraform.pem
+
+                        echo "Key saved:"
+                        head -n 2 ../terraform.pem
+                    '''
+                }
             }
         }
 
         stage('Generate Inventory') {
             steps {
                 sh '''
-                    set -e
-
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
-                    echo "APP_IP=$APP_IP"
-                    echo "MONITOR_IP=$MONITOR_IP"
+                    echo "[app]" > hosts.ini
+                    echo "$APP_IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY" >> hosts.ini
 
-                    find_user() {
-                        for u in ubuntu ec2-user admin centos; do
-                            ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 "exit" &>/dev/null && echo $u && return
-                        done
-                        echo "ubuntu"
-                    }
-
-                    APP_USER=$(find_user $APP_IP)
-                    MONITOR_USER=$(find_user $MONITOR_IP)
-
-                    echo "Detected users: $APP_USER / $MONITOR_USER"
-
-                    cat > hosts.ini <<EOF
-[app_servers]
-$APP_IP ansible_user=$APP_USER ansible_ssh_private_key_file=$SSH_KEY
-
-[monitoring_servers]
-$MONITOR_IP ansible_user=$MONITOR_USER ansible_ssh_private_key_file=$SSH_KEY
-
-[all:vars]
-ansible_python_interpreter=/usr/bin/python3
-EOF
+                    echo "[monitor]" >> hosts.ini
+                    echo "$MONITOR_IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY" >> hosts.ini
 
                     cat hosts.ini
                 '''
             }
         }
 
-        stage('Wait for SSH') {
+        stage('Wait SSH') {
             steps {
                 sh '''
-                    set +e
-
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
-                    MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
-
-                    echo "Waiting for SSH..."
 
                     for i in $(seq 1 20); do
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$APP_IP "exit" && \
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$MONITOR_IP "exit" && break
-
-                        echo "Retry $i/20..."
+                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no ubuntu@$APP_IP "echo OK" && break
+                        echo "waiting SSH... $i"
                         sleep 10
                     done
                 '''
             }
         }
 
-        stage('Run Ansible') {
+        stage('Ansible Run') {
             steps {
                 sh '''
+                    chmod 600 $SSH_KEY || true
+
                     $ANSIBLE_VENV/bin/ansible-playbook -i hosts.ini setup.yml \
                         -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
                 '''
             }
         }
 
-        stage('Build Docker Image') {
+        stage('Docker Build') {
             steps {
                 sh '''
                     docker build -t $DOCKER_IMAGE:$IMAGE_TAG .
@@ -170,19 +139,17 @@ EOF
             }
         }
 
-        stage('Push Docker Image') {
+        stage('Docker Push') {
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
+                    usernameVariable: 'U',
+                    passwordVariable: 'P'
                 )]) {
                     sh '''
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-
+                        echo "$P" | docker login -u "$U" --password-stdin
                         docker push $DOCKER_IMAGE:$IMAGE_TAG
                         docker push $DOCKER_IMAGE:latest
-
                         docker logout
                     '''
                 }
@@ -192,13 +159,13 @@ EOF
 
     post {
         success {
-            echo "SUCCESS: Pipeline completed successfully"
+            echo "SUCCESS"
         }
         failure {
-            echo "FAILED: Check Terraform, SSH key, or AWS security groups"
+            echo "FAILED - check SSH key / Terraform / AWS"
         }
         always {
-            echo "Pipeline finished"
+            echo "DONE"
         }
     }
 }
