@@ -4,17 +4,11 @@ pipeline {
     environment {
         AWS_DEFAULT_REGION = 'eu-north-1'
         TF_IN_AUTOMATION = 'true'
-
         DOCKER_IMAGE = 'abdo1997mohamed2030/clientops-app'
         IMAGE_TAG = "${BUILD_NUMBER}"
-
         ANSIBLE_VENV = '/opt/ansible-venv'
         PATH = "${ANSIBLE_VENV}/bin:${env.PATH}"
-
-        WORK_DIR = "${WORKSPACE}"
-        TF_DIR = "${WORKSPACE}/terraform"
-
-        SSH_KEY = "${WORKSPACE}/terraform.pem"
+        SSH_KEY = '/var/jenkins_home/.ssh/terraform.pem'
     }
 
     options {
@@ -35,13 +29,13 @@ pipeline {
         stage('Verify Tools') {
             steps {
                 sh '''
-                    echo "=== Tools Check ==="
+                    echo "=== Checking installed tools ==="
                     git --version
                     python3 --version
                     docker --version
                     terraform version
+                    ansible --version || echo "Ansible not found"
                     aws --version
-                    ansible --version || true
                 '''
             }
         }
@@ -51,50 +45,26 @@ pipeline {
                 sh '''
                     if [ ! -d "$ANSIBLE_VENV" ]; then
                         python3 -m venv $ANSIBLE_VENV
-                        $ANSIBLE_VENV/bin/pip install --upgrade pip
-                        $ANSIBLE_VENV/bin/pip install ansible
+                        source $ANSIBLE_VENV/bin/activate
+                        pip install --upgrade pip
+                        pip install ansible
                     fi
-
-                    echo "=== Ansible Version ==="
+                    echo "=== Ansible version in venv ==="
                     $ANSIBLE_VENV/bin/ansible --version
                 '''
             }
         }
 
-        stage('Terraform Init & Apply (FIXED)') {
+        stage('Terraform Apply') {
             steps {
-                dir('terraform') {
-                    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws']]) {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws']]) {
+                    dir('terraform') {
                         sh '''
-                            terraform init -reconfigure
-
-                            # IMPORTANT: prevent duplicate resources
-                            terraform plan -out=tfplan
-                            terraform apply -auto-approve tfplan
-
-                            terraform output -json > tf-output.json
+                            terraform init
+                            terraform validate
+                            terraform apply -auto-approve
                         '''
                     }
-                }
-            }
-        }
-
-        stage('Fix SSH Key from Terraform') {
-            steps {
-                dir('terraform') {
-                    sh '''
-                        echo "Extracting SSH key from Terraform state..."
-
-                        terraform output -raw private_key > ../terraform.pem || true
-
-                        if [ -f ../terraform.pem ]; then
-                            chmod 600 ../terraform.pem
-                            echo "SSH key saved successfully"
-                        else
-                            echo "ERROR: No private key output found in Terraform!"
-                            exit 1
-                        fi
-                    '''
                 }
             }
         }
@@ -102,26 +72,23 @@ pipeline {
         stage('Generate Inventory') {
             steps {
                 sh '''
-                    set -e
-
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
 
-                    echo "APP_IP=$APP_IP"
-                    echo "MONITOR_IP=$MONITOR_IP"
-
-                    find_user() {
+                    # Detect working SSH user (tries common users)
+                    find_ssh_user() {
                         for u in ubuntu ec2-user admin centos; do
-                            ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 "exit" &>/dev/null && echo $u && return
+                            ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $u@$1 'exit' &>/dev/null && echo $u && return
                         done
-                        echo "ubuntu"
+                        echo "ERROR: No SSH user works for $1" && exit 1
                     }
 
-                    APP_USER=$(find_user $APP_IP)
-                    MONITOR_USER=$(find_user $MONITOR_IP)
+                    APP_USER=$(find_ssh_user $APP_IP)
+                    MONITOR_USER=$(find_ssh_user $MONITOR_IP)
+                    echo "Detected users: $APP_IP -> $APP_USER, $MONITOR_IP -> $MONITOR_USER"
 
-                    echo "Detected users: $APP_USER / $MONITOR_USER"
-
+                    # Generate inventory without extra "ok"
+                    mkdir -p /var/jenkins_home/.ansible/tmp
                     cat > hosts.ini <<EOF
 [app_servers]
 $APP_IP ansible_user=$APP_USER ansible_ssh_private_key_file=$SSH_KEY
@@ -132,40 +99,37 @@ $MONITOR_IP ansible_user=$MONITOR_USER ansible_ssh_private_key_file=$SSH_KEY
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
 EOF
-
+                    echo "=== Generated hosts.ini ==="
                     cat hosts.ini
                 '''
             }
         }
 
-        stage('Wait for SSH') {
+        stage('Wait for SSH Access') {
             steps {
                 sh '''
-                    set +e
-
                     APP_IP=$(cd terraform && terraform output -raw app_server_public_ip)
                     MONITOR_IP=$(cd terraform && terraform output -raw monitoring_server_public_ip)
+                    APP_USER=$(grep "$APP_IP" hosts.ini | sed -n 's/.*ansible_user=\\([^ ]*\\).*/\\1/p')
+                    MONITOR_USER=$(grep "$MONITOR_IP" hosts.ini | sed -n 's/.*ansible_user=\\([^ ]*\\).*/\\1/p')
 
-                    echo "Waiting for SSH..."
-
-                    for i in $(seq 1 20); do
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$APP_IP "exit" && \
-                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@$MONITOR_IP "exit" && break
-
-                        echo "Retry $i/20..."
+                    echo "Waiting for SSH access..."
+                    for i in {1..12}; do
+                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $APP_USER@$APP_IP 'exit' && \
+                        ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o ConnectTimeout=5 $MONITOR_USER@$MONITOR_IP 'exit' && break
+                        echo "SSH not ready yet, retrying 10s..."
                         sleep 10
                     done
                 '''
             }
         }
 
-        stage('Run Ansible') {
+        stage('Run Ansible Setup') {
             steps {
                 sh '''
-                    chmod 600 $SSH_KEY || true
-
+                    chmod 600 $SSH_KEY
                     $ANSIBLE_VENV/bin/ansible-playbook -i hosts.ini setup.yml \
-                        -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'"
+                        --ssh-extra-args="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
                 '''
             }
         }
@@ -183,15 +147,13 @@ EOF
             steps {
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub',
-                    usernameVariable: 'DOCKER_USER',
-                    passwordVariable: 'DOCKER_PASS'
+                    usernameVariable: 'DOCKERHUB_USER',
+                    passwordVariable: 'DOCKERHUB_PASS'
                 )]) {
                     sh '''
-                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-
+                        echo "$DOCKERHUB_PASS" | docker login -u "$DOCKERHUB_USER" --password-stdin
                         docker push $DOCKER_IMAGE:$IMAGE_TAG
                         docker push $DOCKER_IMAGE:latest
-
                         docker logout
                     '''
                 }
@@ -200,14 +162,8 @@ EOF
     }
 
     post {
-        success {
-            echo "SUCCESS: Deployment completed"
-        }
-        failure {
-            echo "FAILED: Check Terraform / SSH / AWS permissions"
-        }
-        always {
-            echo "Pipeline finished"
-        }
+        success { echo 'SUCCESS: Pipeline completed successfully!' }
+        failure { echo 'FAILED: Check SSH key, user, and console logs.' }
+        always { echo 'Pipeline finished.' }
     }
 }
