@@ -1,16 +1,15 @@
 # ---------------------------
-# Data: Default VPC
+# Default VPC
 # ---------------------------
 data "aws_vpc" "default" {
   default = true
 }
 
-# ---------------------------
-# Data: Latest Ubuntu 22.04 AMI
+# Ubuntu AMI
 # ---------------------------
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical
+  owners      = ["099720109477"]
 
   filter {
     name   = "name"
@@ -19,15 +18,21 @@ data "aws_ami" "ubuntu" {
 }
 
 # ---------------------------
-# Security Group - Allow all
+# Random suffix (fix duplicates)
+# ---------------------------
+resource "random_id" "suffix" {
+  byte_length = 4
+}
+
+# ---------------------------
+# Security Group (FIXED)
 # ---------------------------
 resource "aws_security_group" "clientops_sg" {
-  name        = "clientops_sg"
+  name        = "clientops-sg-${random_id.suffix.hex}"
   description = "Allow all traffic"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "All inbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -35,7 +40,6 @@ resource "aws_security_group" "clientops_sg" {
   }
 
   egress {
-    description = "All outbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -44,23 +48,20 @@ resource "aws_security_group" "clientops_sg" {
 }
 
 # ---------------------------
-# Generate SSH Key (IMPORTANT)
+# SSH Key (NO FILE DEPENDENCY)
 # ---------------------------
 resource "tls_private_key" "terraform" {
   algorithm = "RSA"
   rsa_bits  = 2048
 }
 
-# ---------------------------
-# AWS Key Pair
-# ---------------------------
 resource "aws_key_pair" "terraform" {
-  key_name   = "terraform-key"
+  key_name   = "terraform-key-${random_id.suffix.hex}"
   public_key = tls_private_key.terraform.public_key_openssh
 }
 
 # ---------------------------
-# Root Public Key for User Data
+# Root SSH access
 # ---------------------------
 variable "root_public_key" {
   default = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDxkfLKhCBPFlOvgyDpRmupFyzhrvA5yxmBfuQfdFj+Eie6xebK8p9P+zClSxYcDlKVFVqFuxItT6mNZmNYxgWCK1hFAVAOcwd7Stn8MvqaQzXDogWk3VPp5YzbgwdDQceQRKHfw9wli0JmHfjlTz5zkQ/hV5wwcM9s9edh5kcqKlnFwOeLDgRZ0fEjBr0gUI2I2EQEOdQPAzL+Q92Pp9oEuYoqsu7iryqAQwfPhNDYx7S7FhHjUKDq5fWHlZH4kc0wBYjphjwoXb/cJYv5ZPnwDSdKT4E4ct+3HiYxFtrpbsKRc7sLwMTt6Hwv+ujb7oqKBfv2Z3aKLeF9X5Mi3NO/"
@@ -107,4 +108,3 @@ resource "aws_instance" "monitoring_server" {
 
   user_data = local.user_data_root_key
 }
-
